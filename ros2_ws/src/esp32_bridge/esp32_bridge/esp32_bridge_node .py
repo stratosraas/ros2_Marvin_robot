@@ -54,14 +54,23 @@ class Esp32BridgeNode(Node):
         self.declare_parameter('cmd_timeout_sec', 0.5)        # 上位机侧超时
         self.declare_parameter('max_linear', 0.5)             # 速度限幅 (与 config.h 对齐)
         self.declare_parameter('max_angular', 1.0)
+        # ---- 里程计标度校准 (只影响 /odom 积分, 不影响 cmd_vel 下发) ----
+        # 用法: 让小车跑实际 2.0m, 看 /odom 报告距离. 系数 = 实际 / odom报告
+        self.declare_parameter('linear_scale', 1.0)           # 线速度积分校准
+        self.declare_parameter('angular_scale', 1.0)          # 角速度积分校准
 
-        self.port        = self.get_parameter('port').value
-        self.baudrate    = self.get_parameter('baudrate').value
-        self.publish_tf  = self.get_parameter('publish_tf').value
-        self.odom_frame  = self.get_parameter('odom_frame').value
-        self.base_frame  = self.get_parameter('base_frame').value
-        self.max_linear  = float(self.get_parameter('max_linear').value)
-        self.max_angular = float(self.get_parameter('max_angular').value)
+        self.port         = self.get_parameter('port').value
+        self.baudrate     = self.get_parameter('baudrate').value
+        self.publish_tf   = self.get_parameter('publish_tf').value
+        self.odom_frame   = self.get_parameter('odom_frame').value
+        self.base_frame   = self.get_parameter('base_frame').value
+        self.max_linear   = float(self.get_parameter('max_linear').value)
+        self.max_angular  = float(self.get_parameter('max_angular').value)
+        self.linear_scale  = float(self.get_parameter('linear_scale').value)
+        self.angular_scale = float(self.get_parameter('angular_scale').value)
+        self.get_logger().info(
+            f'odom calibration: linear_scale={self.linear_scale}, angular_scale={self.angular_scale}'
+        )
 
         # ---------------- 里程计状态 ----------------
         self.x     = 0.0
@@ -207,19 +216,25 @@ class Esp32BridgeNode(Node):
                 self._publish_odom(now)
                 return
 
+            # 应用里程计标度校准 (只影响位置积分, 不影响 PID 闭环)
+            vx_cal = vx * self.linear_scale
+            vy_cal = vy * self.linear_scale
+            wz_cal = wz * self.angular_scale
+
             # 机体系速度 -> 世界系 (三轮全向, 支持 vy 非零)
             cos_th = math.cos(self.theta)
             sin_th = math.sin(self.theta)
-            dx_world = (vx * cos_th - vy * sin_th) * dt
-            dy_world = (vx * sin_th + vy * cos_th) * dt
-            dth      = wz * dt
+            dx_world = (vx_cal * cos_th - vy_cal * sin_th) * dt
+            dy_world = (vx_cal * sin_th + vy_cal * cos_th) * dt
+            dth      = wz_cal * dt
 
             self.x     += dx_world
             self.y     += dy_world
             self.theta += dth
             self.theta = math.atan2(math.sin(self.theta), math.cos(self.theta))
 
-            self.vx, self.vy, self.wz = vx, vy, wz
+            # 发布的 twist 用校准后的值, 这样 RTAB-Map / Nav2 看到的速度也是校准过的
+            self.vx, self.vy, self.wz = vx_cal, vy_cal, wz_cal
             self._publish_odom(now)
 
     # ================================================================
